@@ -1,6 +1,6 @@
 const fs  = require("fs");
 const rl  = require("readline").createInterface({ input: process.stdin, output: process.stdout });
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const EMAIL_FILE    = "email.txt";
