@@ -170,20 +170,16 @@ async function run(email, password) {
   console.log(`[*] Name     : ${name}`);
   console.log(`[*] Username : @${username}`);
 
-  console.log("[1/4] Fetch headers...");
-  if (!await stepFetchHeaders(device, headers)) { console.log("[!] Gagal."); return; }
-  await sleep(rand(2000, 4000));
-
-  console.log("[2/4] Kirim OTP ke email...");
+  console.log("[1/3] Kirim OTP ke email...");
   if (!await stepSendOtp(device, email, headers)) { console.log("[!] Gagal kirim OTP."); return; }
 
-  const otp = (await ask(`[3/4] OTP dari ${email} : `)).trim();
+  const otp = (await ask(`[2/3] OTP dari ${email} : `)).trim();
   if (!otp) { console.log("[!] OTP kosong, skip."); return; }
 
   const signupCode = await stepVerifyOtp(device, email, otp, headers);
   if (!signupCode) { console.log("[!] OTP salah / expired."); return; }
 
-  console.log("[4/4] Buat akun...");
+  console.log("[3/3] Buat akun...");
   const result = await stepCreate(device, email, password, username, name, signupCode, headers);
   if (!result) return;
 
