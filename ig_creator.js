@@ -1,6 +1,6 @@
 const fs  = require("fs");
 const rl  = require("readline").createInterface({ input: process.stdin, output: process.stdout });
-const { randomUUID: uuidv4 } = require("crypto");
+const { randomUUID } = require("crypto");
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const EMAIL_FILE    = "email.txt";
@@ -39,6 +39,22 @@ const rand  = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ask   = q  => new Promise(r => rl.question(q, r));
 
+// Cookie jar sederhana
+class CookieJar {
+  constructor() { this.jar = {}; }
+  update(res) {
+    const raw = res.headers.getSetCookie?.() ?? [];
+    for (const c of raw) {
+      const [kv] = c.split(";");
+      const eq = kv.indexOf("=");
+      if (eq > -1) this.jar[kv.slice(0, eq).trim()] = kv.slice(eq + 1).trim();
+    }
+  }
+  toString() {
+    return Object.entries(this.jar).map(([k,v]) => `${k}=${v}`).join("; ");
+  }
+}
+
 function genName()     { return `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`; }
 function genUsername(name) {
   const [first, last] = name.toLowerCase().split(" ");
@@ -53,8 +69,8 @@ function genUsername(name) {
 function genDevice() {
   const [manufacturer, model, codename, cpu] = pick(DEVICES);
   return {
-    phone_id: uuidv4(), device_id: "android-" + uuidv4().replace(/-/g,"").slice(0,16),
-    uuid: uuidv4(), waterfall_id: uuidv4(),
+    phone_id: randomUUID(), device_id: "android-" + randomUUID().replace(/-/g,"").slice(0,16),
+    uuid: randomUUID(), waterfall_id: randomUUID(),
     manufacturer, model, codename, cpu,
     resolution: pick(["1080x2220","1080x2340","1080x2400"]),
     dpi: pick(["420","480","560"]),
@@ -63,9 +79,9 @@ function genDevice() {
 function calcJazoest(phoneId) {
   return "2" + [...phoneId].reduce((s, c) => s + c.charCodeAt(0), 0);
 }
-function buildHeaders(device) {
+function buildHeaders(device, cookies) {
   const ua = `Instagram ${IG_VERSION} Android (33/13; ${device.dpi}dpi; ${device.resolution}; ${device.manufacturer}; ${device.model}; ${device.codename}; ${device.cpu}; en_US; 655896867)`;
-  return {
+  const h = {
     "User-Agent":             ua,
     "X-IG-App-ID":            IG_APP_ID,
     "X-IG-Capabilities":      "3brTvwE=",
@@ -79,63 +95,72 @@ function buildHeaders(device) {
     "X-IG-Mapped-Locale":     "en_US",
     "X-IG-Device-ID":         device.uuid,
     "X-IG-Android-ID":        device.device_id,
-    "X-Pigeon-Session-Id":    uuidv4(),
+    "X-Pigeon-Session-Id":    randomUUID(),
     "X-Pigeon-Rawclienttime": (Date.now() / 1000).toFixed(3),
     "X-Bloks-Version-Id":     "ce9b4eb3f7fc0b57b4e4af765b66b3bfe9e3a5bbd58e50feac0e6ed8a6834bc5",
     "X-Bloks-Is-Layout-RTL":  "false",
+    "X-Requested-With":       "com.instagram.android",
     "Accept-Language":        "en-US",
     "Accept-Encoding":        "gzip, deflate",
     "Content-Type":           "application/x-www-form-urlencoded",
     "Connection":             "close",
   };
+  const cookieStr = cookies.toString();
+  if (cookieStr) h["Cookie"] = cookieStr;
+  if (cookies.jar["csrftoken"]) h["X-CSRFToken"] = cookies.jar["csrftoken"];
+  return h;
 }
 
 // ─── IG API ──────────────────────────────────────────────────────────────────
-async function igGet(url, params, headers) {
+async function igGet(url, params, device, cookies) {
   const qs = new URLSearchParams(params).toString();
-  const r  = await fetch(`${url}?${qs}`, { headers });
+  const r  = await fetch(`${url}?${qs}`, { headers: buildHeaders(device, cookies) });
+  cookies.update(r);
   return { status: r.status, data: await r.text() };
 }
 
-async function igPost(url, body, headers) {
+async function igPost(url, body, device, cookies) {
   const r = await fetch(url, {
     method: "POST",
-    headers,
+    headers: buildHeaders(device, cookies),
     body: new URLSearchParams(body).toString(),
   });
+  cookies.update(r);
   const text = await r.text();
   let data = text;
   try { data = JSON.parse(text); } catch {}
   return { status: r.status, data };
 }
 
-async function stepFetchHeaders(device, headers) {
-  const r = await igGet(`${IG_BASE}/api/v1/si/fetch_headers/`,
-    { challenge_type: "signup", guid: device.uuid.replace(/-/g,"") }, headers);
-  console.log(`  [fetch_headers] ${r.status}`);
-  return r.status === 200;
+async function stepInitSession(device, cookies) {
+  const r = await igGet(
+    `${IG_BASE}/api/v1/si/fetch_headers/`,
+    { challenge_type: "signup", guid: device.uuid.replace(/-/g,"") },
+    device, cookies
+  );
+  console.log(`  [fetch_headers] ${r.status} — cookies: ${Object.keys(cookies.jar).join(", ") || "none"}`);
 }
 
-async function stepSendOtp(device, email, headers) {
+async function stepSendOtp(device, email, cookies) {
   const r = await igPost(`${IG_BASE}/api/v1/accounts/send_verify_email/`, {
     phone_id: device.phone_id, device_id: device.device_id,
     email, waterfall_id: device.waterfall_id, tos_version: "row",
-  }, headers);
+  }, device, cookies);
   console.log(`  [send_verify_email] ${r.status} → ${JSON.stringify(r.data).slice(0,150)}`);
   return r.status === 200;
 }
 
-async function stepVerifyOtp(device, email, otp, headers) {
+async function stepVerifyOtp(device, email, otp, cookies) {
   const r = await igPost(`${IG_BASE}/api/v1/accounts/check_confirmation_code/`, {
     code: otp, device_id: device.device_id,
     email, waterfall_id: device.waterfall_id,
-  }, headers);
+  }, device, cookies);
   console.log(`  [check_confirmation_code] ${r.status} → ${JSON.stringify(r.data).slice(0,150)}`);
   if (r.status === 200) return r.data?.signup_code || r.data?.code || null;
   return null;
 }
 
-async function stepCreate(device, email, password, username, name, signupCode, headers) {
+async function stepCreate(device, email, password, username, name, signupCode, cookies) {
   const r = await igPost(`${IG_BASE}/api/v1/accounts/create/`, {
     jazoest:            calcJazoest(device.phone_id),
     country_codes:      '[{"country_code":"1","source":["default"]}]',
@@ -150,7 +175,7 @@ async function stepCreate(device, email, password, username, name, signupCode, h
     do_not_auto_login_if_credentials_match: "false",
     device_id: device.device_id, uuid: device.uuid,
     waterfall_id: device.waterfall_id, _uuid: device.uuid,
-  }, headers);
+  }, device, cookies);
   console.log(`  [create] ${r.status} → ${JSON.stringify(r.data).slice(0,200)}`);
   return r.status === 200 ? r.data : null;
 }
@@ -163,24 +188,28 @@ function saveResult(email, username, password, uid = "") {
 async function run(email, password) {
   console.log("\n" + "─".repeat(55));
   const device  = genDevice();
-  const headers = buildHeaders(device);
+  const cookies = new CookieJar();
   const name     = genName();
   const username = genUsername(name);
   console.log(`[*] Email    : ${email}`);
   console.log(`[*] Name     : ${name}`);
   console.log(`[*] Username : @${username}`);
 
+  console.log("[0/3] Init session...");
+  await stepInitSession(device, cookies);
+  await sleep(rand(2000, 4000));
+
   console.log("[1/3] Kirim OTP ke email...");
-  if (!await stepSendOtp(device, email, headers)) { console.log("[!] Gagal kirim OTP."); return; }
+  if (!await stepSendOtp(device, email, cookies)) { console.log("[!] Gagal kirim OTP."); return; }
 
   const otp = (await ask(`[2/3] OTP dari ${email} : `)).trim();
   if (!otp) { console.log("[!] OTP kosong, skip."); return; }
 
-  const signupCode = await stepVerifyOtp(device, email, otp, headers);
+  const signupCode = await stepVerifyOtp(device, email, otp, cookies);
   if (!signupCode) { console.log("[!] OTP salah / expired."); return; }
 
   console.log("[3/3] Buat akun...");
-  const result = await stepCreate(device, email, password, username, name, signupCode, headers);
+  const result = await stepCreate(device, email, password, username, name, signupCode, cookies);
   if (!result) return;
 
   const uid = result?.created_user?.pk ?? "";
